@@ -2,7 +2,6 @@ sudo apt install python3-venv
 python3 -m venv /usr/lib/python3.11/venv
 source /usr/lib/python3.11/venv/bin/activate
 pip install prometheus-client
-/usr/lib/python3.11/venv/bin/python script.py
 
 
 cat << FLAG > /etc/systemd/system/freeswitch_recording_exporter.service
