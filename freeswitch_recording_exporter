@@ -1,0 +1,148 @@
+import os
+import subprocess
+import sys
+import threading
+import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import socket
+from prometheus_client import Gauge, CollectorRegistry, generate_latest
+
+PORT_NUMBER = 9255
+
+# Define metrics
+registry = CollectorRegistry()
+host = socket.gethostname()
+
+# Existing FreeSWITCH metrics
+freeswitch_total_active_channels_metric = Gauge(
+    "freeswitch_active_channels", "Total current active channels", ["type"], registry=registry
+)
+freeswitch_total_active_calls_metric = Gauge(
+    "freeswitch_active_calls", "Total current active calls", ["type"], registry=registry
+)
+freeswitch_total_session_processed_metric = Gauge(
+    "freeswitch_session_processed", "Total current calls processed", ["type"], registry=registry
+)
+freeswitch_total_core_uptime_metric = Gauge(
+    "freeswitch_core_uptime", "Total core uptime", ["type"], registry=registry
+)
+siprec_total_recording_temp_metric = Gauge(
+    "siprec_total_recording_temp", "Total SIPREC files temp", ["type"], registry=registry
+)
+siprec_total_recording_metric = Gauge(
+    "siprec_total_recording", "Total SIPREC files final", ["type"], registry=registry
+)
+freeswitch_idle_cpu_metric = Gauge(
+    "freeswitch_idle_cpu", "Freeswitch CPU idle", ["type"], registry=registry
+)
+
+# New metrics for RAM and Disk usage
+ram_total_metric = Gauge(
+    "system_ram_total", "Total RAM (bytes)", ["type"], registry=registry
+)
+ram_used_metric = Gauge(
+    "system_ram_used", "Used RAM (bytes)", ["type"], registry=registry
+)
+disk_local_usage_metric = Gauge(
+    "disk_local_usage", "Used Disk (bytes)", ["type"], registry=registry
+)
+disk_mount_usage_metric = Gauge(
+    "disk_mount_usage", "Used Disk (bytes)", ["type"], registry=registry
+)
+
+def run_command(command):
+    """Run a shell command and return its output."""
+    try:
+        result = subprocess.run(
+            command, shell=True, text=True, capture_output=True, check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return "0"
+
+
+def gather_data():
+    """Gather metrics periodically."""
+    while True:
+        time.sleep(1)
+
+        # Existing FreeSWITCH metrics
+        active_channels = run_command("fs_cli -x 'show channels' | grep 'total' | awk '{print $1}'") or "0"
+        freeswitch_total_active_channels_metric.labels(type="active channels").set(float(active_channels) if active_channels.isdigit() else 0)
+
+        active_calls = run_command("fs_cli -x 'show calls count' | awk '{print $1}'") or "0"
+        freeswitch_total_active_calls_metric.labels(type="active calls").set(float(active_calls) if active_calls.isdigit() else 0)
+
+        session_processed = run_command("fs_cli -x 'status' | grep 'since startup' | awk '{print $1}'") or "0"
+        freeswitch_total_session_processed_metric.labels(type="calls processed").set(float(session_processed) if session_processed.isdigit() else 0)
+
+        core_uptime = run_command("fs_cli -x 'uptime'") or "0"
+        freeswitch_total_core_uptime_metric.labels(type="core uptime").set(float(core_uptime) if core_uptime.isdigit() else 0)
+
+        siprec_total_recording_temp = run_command("ls /var/lib/freeswitch/recordings/ | wc -l") or "0"
+        siprec_total_recording_temp_metric.labels(type="total siprec file temp").set(float(siprec_total_recording_temp) if siprec_total_recording_temp.isdigit() else 0)
+        
+        siprec_total_recording = run_command("ls /winshare/siprec/ | wc -l") or "0"
+        siprec_total_recording_metric.labels(type="total siprec file final").set(float(siprec_total_recording) if siprec_total_recording.isdigit() else 0)
+        
+        freeswitch_idle_cpu = run_command("fs_cli -x 'status' | grep 'idle cpu' | awk -F'/' '{print $2}'") or "0"
+        try:
+            freeswitch_idle_cpu_metric.labels(type="freeswitch idle cpu").set(float(freeswitch_idle_cpu))
+        except ValueError:
+            freeswitch_idle_cpu_metric.labels(type="freeswitch idle cpu").set(0)
+
+        # New RAM metrics (convert to GB and calculate percentage)
+        ram_total = run_command("free -b | grep Mem | awk '{print $2}'") or "0"
+        ram_used = run_command("free -b | grep Mem | awk '{print $3}'") or "0"
+
+        # Convert bytes to GB by dividing by 1024^3
+        ram_total_gb = float(ram_total) / (1024 ** 3) if ram_total.isdigit() else 0
+        ram_used_gb = float(ram_used) / (1024 ** 3) if ram_used.isdigit() else 0
+
+        # Calculate RAM usage percentage
+        ram_used_percent = (ram_used_gb / ram_total_gb * 100) if ram_total_gb > 0 else 0
+
+        ram_total_metric.labels(type="total").set(ram_total_gb)
+        ram_used_metric.labels(type="used").set(ram_used_gb)
+        ram_used_percent_metric.labels(type="percent").set(ram_used_percent)
+
+
+# Add new metrics for RAM and Disk usage percentages
+ram_used_percent_metric = Gauge(
+"system_ram_used_percent", "Percentage of RAM used", ["type"], registry=registry
+)
+
+disk_local_usage = run_command("df -B1 '/' | tail -n 1 | awk '{print $5}'").strip('%') or "0"
+disk_local_usage_metric.labels(type="disk local usage").set(float(disk_local_usage) if disk_local_usage.isdigit() else 0)
+
+disk_mount_usage = run_command("df -B1 | grep 'winshare' | awk '{print $5}'").strip('%') or "0"
+disk_mount_usage_metric.labels(type="disk mount usage").set(float(disk_mount_usage) if disk_mount_usage.isdigit() else 0)
+
+
+class MetricsHandler(BaseHTTPRequestHandler):
+    """HTTP handler for serving metrics."""
+
+    def do_GET(self):
+        if self.path == "/metrics":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.end_headers()
+            self.wfile.write(generate_latest(registry))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+if __name__ == "__main__":
+    # Start data gathering thread
+    thread = threading.Thread(target=gather_data, daemon=True)
+    thread.start()
+
+    # Start HTTP server
+    server = HTTPServer(("", PORT_NUMBER), MetricsHandler)
+    print(f"Starting HTTP server on port {PORT_NUMBER}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("Shutting down server.")
+        server.server_close()
