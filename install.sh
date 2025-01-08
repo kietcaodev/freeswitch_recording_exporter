@@ -1,5 +1,7 @@
 sudo apt -y install python3-venv
+sleep 1
 python3 -m venv /usr/lib/python3.11/venv
+sleep 1
 source /usr/lib/python3.11/venv/bin/activate
 pip install prometheus-client
 cp /tmp/freeswitch_recording_exporter/freeswitch_recording_exporter /usr/local/bin/freeswitch_recording_exporter
