@@ -1,0 +1,195 @@
+import os
+import subprocess
+import threading
+import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import socket
+from prometheus_client import Gauge, CollectorRegistry, generate_latest
+
+PORT_NUMBER = 9255
+
+# Define metrics
+registry = CollectorRegistry()
+host = socket.gethostname()
+
+# Existing FreeSWITCH metrics
+freeswitch_total_active_channels_metric = Gauge(
+    "freeswitch_active_channels", "Total current active channels", ["type"], registry=registry
+)
+freeswitch_total_active_calls_metric = Gauge(
+    "freeswitch_active_calls", "Total current active calls", ["type"], registry=registry
+)
+freeswitch_total_session_processed_metric = Gauge(
+    "freeswitch_session_processed", "Total current calls processed", ["type"], registry=registry
+)
+freeswitch_total_core_uptime_metric = Gauge(
+    "freeswitch_core_uptime", "Total core uptime", ["type"], registry=registry
+)
+phone_total_recording_temp_metric = Gauge(
+    "phone_total_recording_temp", "Total SIPREC files temp", ["type"], registry=registry
+)
+phone_total_recording_metric = Gauge(
+    "phone_total_recording", "Total SIPREC files final", ["type"], registry=registry
+)
+freeswitch_idle_cpu_metric = Gauge(
+    "freeswitch_idle_cpu", "Freeswitch CPU idle", ["type"], registry=registry
+)
+
+# New metrics for RAM and Disk usage
+ram_total_metric = Gauge(
+    "system_ram_total", "Total RAM (bytes)", ["type"], registry=registry
+)
+ram_used_metric = Gauge(
+    "system_ram_used", "Used RAM (bytes)", ["type"], registry=registry
+)
+disk_local_usage_metric = Gauge(
+    "disk_local_usage", "Used Disk (bytes)", ["type"], registry=registry
+)
+disk_mount_usage_metric = Gauge(
+    "disk_mount_usage", "Used Disk (bytes)", ["type"], registry=registry
+)
+
+# Live call recording metric
+live_call_record_metric = Gauge(
+    "live_call_recording", "Details of live call recordings", ["call_id", "cisco_id", "extension", "phone_number"], registry=registry
+)
+
+RECORDINGS_DIR = "/var/lib/freeswitch/recordings/"
+
+def run_command(command):
+    """Run a shell command and return its output."""
+    try:
+        result = subprocess.run(
+            command, shell=True, text=True, capture_output=True, check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return "0"
+
+def parse_recording_file(filename):
+    """
+    Parse a recording filename to extract recording details.
+
+    :param filename: Name of the recording file
+    :return: A dictionary with call_id, cisco_id, extension, and phone_number
+    """
+    try:
+        parts = filename.split("_")
+        if len(parts) < 6:
+            return None  # Skip files that don't match the expected format
+
+        extension = parts[1]
+        phone_number = parts[2]
+        cisco_id = parts[4]
+        call_id = parts[5].split(".")[0]  # Remove the file extension
+
+        return {
+            "call_id": call_id,
+            "cisco_id": cisco_id,
+            "extension": extension,
+            "phone_number": phone_number,
+        }
+    except Exception as e:
+        print(f"Error parsing filename {filename}: {e}")
+        return None
+
+def update_live_call_metrics():
+    """
+    Update Prometheus metrics for live call recordings.
+    """
+    try:
+        files = os.listdir(RECORDINGS_DIR)
+        active_calls = set()  # Track active calls to prevent redundant metrics
+
+        for file in files:
+            if file.endswith(".ogg"):
+                details = parse_recording_file(file)
+                if details:
+                    active_calls.add(details["call_id"])
+                    live_call_record_metric.labels(
+                        call_id=details["call_id"],
+                        cisco_id=details["cisco_id"],
+                        extension=details["extension"],
+                        phone_number=details["phone_number"],
+                    ).set(1)  # Use 1 to indicate the call is active
+
+        for label_values in list(live_call_record_metric._metrics.keys()):
+            if label_values[0] not in active_calls:  # Remove metrics for deleted files
+                live_call_record_metric.remove(*label_values)
+    except Exception as e:
+        print(f"Error updating live call metrics: {e}")
+
+def gather_data():
+    """Gather metrics periodically."""
+    while True:
+        time.sleep(1)
+
+        # Existing FreeSWITCH metrics
+        active_channels = run_command("fs_cli -x 'show channels' | grep 'total' | awk '{print $1}'") or "0"
+        freeswitch_total_active_channels_metric.labels(type="active channels").set(float(active_channels) if active_channels.isdigit() else 0)
+
+        active_calls = run_command("fs_cli -x 'show calls count' | awk '{print $1}'") or "0"
+        freeswitch_total_active_calls_metric.labels(type="active calls").set(float(active_calls) if active_calls.isdigit() else 0)
+
+        session_processed = run_command("fs_cli -x 'status' | grep 'since startup' | awk '{print $1}'") or "0"
+        freeswitch_total_session_processed_metric.labels(type="calls processed").set(float(session_processed) if session_processed.isdigit() else 0)
+
+        core_uptime = run_command("fs_cli -x 'uptime'") or "0"
+        freeswitch_total_core_uptime_metric.labels(type="core uptime").set(float(core_uptime) if core_uptime.isdigit() else 0)
+
+        phone_total_recording_temp = run_command("ls /var/lib/freeswitch/recordings/ | wc -l") or "0"
+        phone_total_recording_temp_metric.labels(type="total phone file temp").set(float(phone_total_recording_temp) if phone_total_recording_temp.isdigit() else 0)
+
+        phone_total_recording = run_command("ls /winshare/recording_mode_phone/ | wc -l") or "0"
+        phone_total_recording_metric.labels(type="total phone file final").set(float(phone_total_recording) if phone_total_recording.isdigit() else 0)
+
+        freeswitch_idle_cpu = run_command("fs_cli -x 'status' | grep 'idle cpu' | awk -F'/' '{print $2}'") or "0"
+        try:
+            freeswitch_idle_cpu_metric.labels(type="freeswitch idle cpu").set(float(freeswitch_idle_cpu))
+        except ValueError:
+            freeswitch_idle_cpu_metric.labels(type="freeswitch idle cpu").set(0)
+
+        update_live_call_metrics()
+
+        # New RAM metrics
+        ram_total = run_command("free -b | grep Mem | awk '{print $2}'") or "0"
+        ram_used = run_command("free -b | grep Mem | awk '{print $3}'") or "0"
+
+        ram_total_gb = float(ram_total) / (1024 ** 3) if ram_total.isdigit() else 0
+        ram_used_gb = float(ram_used) / (1024 ** 3) if ram_used.isdigit() else 0
+
+        ram_used_percent = (ram_used_gb / ram_total_gb * 100) if ram_total_gb > 0 else 0
+
+        ram_total_metric.labels(type="total").set(ram_total_gb)
+        ram_used_metric.labels(type="used").set(ram_used_gb)
+
+        # Disk usage metrics
+        disk_local_usage = run_command("df -B1 '/' | tail -n 1 | awk '{print $5}'").strip('%') or "0"
+        disk_local_usage_metric.labels(type="disk local usage").set(float(disk_local_usage) if disk_local_usage.isdigit() else 0)
+
+        disk_mount_usage = run_command("df -B1 | grep 'winshare' | awk '{print $5}'").strip('%') or "0"
+        disk_mount_usage_metric.labels(type="disk mount usage").set(float(disk_mount_usage) if disk_mount_usage.isdigit() else 0)
+
+class MetricsHandler(BaseHTTPRequestHandler):
+    """HTTP handler for serving metrics."""
+    def do_GET(self):
+        if self.path == "/metrics":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.end_headers()
+            self.wfile.write(generate_latest(registry))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+if __name__ == "__main__":
+    thread = threading.Thread(target=gather_data, daemon=True)
+    thread.start()
+
+    server = HTTPServer(("", PORT_NUMBER), MetricsHandler)
+    print(f"Starting HTTP server on port {PORT_NUMBER}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("Shutting down server.")
+        server.server_close()
