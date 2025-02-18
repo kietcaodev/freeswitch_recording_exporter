@@ -26,10 +26,10 @@ freeswitch_total_core_uptime_metric = Gauge(
     "freeswitch_core_uptime", "Total core uptime", ["type"], registry=registry
 )
 phone_total_recording_temp_metric = Gauge(
-    "phone_total_recording_temp", "Total SIPREC files temp", ["type"], registry=registry
+    "phone_total_recording_temp", "Total PhoneRec files temp", ["type"], registry=registry
 )
 phone_total_recording_metric = Gauge(
-    "phone_total_recording", "Total SIPREC files final", ["type"], registry=registry
+    "phone_total_recording", "Total PhoneRec files final", ["type"], registry=registry
 )
 freeswitch_idle_cpu_metric = Gauge(
     "freeswitch_idle_cpu", "Freeswitch CPU idle", ["type"], registry=registry
