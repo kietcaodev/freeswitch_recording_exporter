@@ -6,6 +6,8 @@ python3 -m venv /usr/lib/python3.11/venv
 
 source /usr/lib/python3.11/venv/bin/activate
 
+pip install prometheus-client
+
 ########### SIPREC ###########
 
 cd /tmp
