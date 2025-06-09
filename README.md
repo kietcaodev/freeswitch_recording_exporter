@@ -1,6 +1,6 @@
 Install metrics monitor for Freeswitch exporter recording on Debian 12
 
-sudo apt install python3-venv
+sudo apt install python3-venv -y
 
 python3 -m venv /usr/lib/python3.11/venv
 
